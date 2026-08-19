@@ -1,0 +1,26 @@
+{
+  "name": "obsidian-mindmap-bridge",
+  "version": "1.0.0",
+  "description": "Obsidian bridge plugin connecting local vault MindMap JSON files to Cloudflare Mind Map Viewer",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "mindmap",
+    "viewer"
+  ],
+  "author": "DeepMind Advanced Coding",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.20.0",
+    "obsidian": "latest",
+    "tslib": "^2.6.2",
+    "typescript": "^5.3.3"
+  }
+}

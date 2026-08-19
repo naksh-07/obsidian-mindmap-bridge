@@ -1,0 +1,9 @@
+{
+    "id": "obsidian-mindmap-bridge",
+    "name": "MindMap Viewer Bridge",
+    "version": "1.0.0",
+    "minAppVersion": "1.0.0",
+    "description": "Connects local vault MindMap JSON files to Cloudflare Mind Map Viewer",
+    "author": "Antigravity AI",
+    "isDesktopOnly": false
+}
