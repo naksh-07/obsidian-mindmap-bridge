@@ -1,9 +1,10 @@
 {
     "id": "obsidian-mindmap-bridge",
     "name": "MindMap Viewer Bridge",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "minAppVersion": "1.0.0",
-    "description": "Connects local vault MindMap JSON files to Cloudflare Mind Map Viewer",
+    "description": "Bi-directional bridge connecting local Obsidian Markdown & .mindmap.json files to the PixiJS v8 WebGL MindMap Studio",
     "author": "Antigravity AI",
     "isDesktopOnly": false
 }
+

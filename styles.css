@@ -21,6 +21,8 @@
 
 .mindmap-bridge-loading {
     display: flex;
+    flex-direction: column;
+    gap: 10px;
     align-items: center;
     justify-content: center;
     position: absolute;
@@ -30,6 +32,29 @@
     bottom: 0;
     background-color: var(--background-primary);
     color: var(--text-muted);
-    font-size: 14px;
+    font-size: 13px;
+    font-weight: 500;
     z-index: 10;
+    transition: opacity 0.2s ease-out;
 }
+
+.mindmap-bridge-loading.is-hidden {
+    display: none !important;
+    pointer-events: none;
+}
+
+.mindmap-bridge-spinner {
+    width: 24px;
+    height: 24px;
+    border: 2.5px solid var(--background-modifier-border);
+    border-top-color: var(--interactive-accent);
+    border-radius: 50%;
+    animation: mindmap-bridge-spin 0.75s linear infinite;
+}
+
+@keyframes mindmap-bridge-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+

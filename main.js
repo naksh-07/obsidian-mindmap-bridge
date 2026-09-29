@@ -32,15 +32,381 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian3 = require("obsidian");
 
 // src/MindMapFileView.ts
+var import_obsidian2 = require("obsidian");
+
+// src/markdownParser.ts
+function detectLanguage(text) {
+  const devanagariMatches = text.match(/[\u0900-\u097F]/g);
+  const latinMatches = text.match(/[A-Za-z]/g);
+  const devCount = devanagariMatches ? devanagariMatches.length : 0;
+  const latCount = latinMatches ? latinMatches.length : 0;
+  if (devCount === 0 && latCount === 0)
+    return "en";
+  if (devCount > 0 && latCount === 0)
+    return "hi";
+  if (latCount > 0 && devCount === 0)
+    return "en";
+  const ratio = devCount / (devCount + latCount);
+  if (ratio >= 0.6)
+    return "hi";
+  if (ratio <= 0.15)
+    return "en";
+  return "mixed";
+}
+function parseFrontmatter(markdown) {
+  const fmRegex = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+  const match = markdown.match(fmRegex);
+  if (!match) {
+    return { frontmatter: {}, body: markdown };
+  }
+  const rawYaml = match[1];
+  const body = markdown.slice(match[0].length);
+  const fm = {};
+  const lines = rawYaml.split(/\r?\n/);
+  for (const line of lines) {
+    const kvMatch = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.+)$/);
+    if (!kvMatch)
+      continue;
+    const key = kvMatch[1].trim().toLowerCase();
+    const rawVal = kvMatch[2].trim().replace(/^["']|["']$/g, "");
+    if (key === "title" && rawVal)
+      fm.title = rawVal;
+    else if (key === "subtitle" && rawVal)
+      fm.subtitle = rawVal;
+    else if (key === "subject" && rawVal)
+      fm.subject = rawVal;
+    else if (key === "chapter" && rawVal)
+      fm.chapter = rawVal;
+    else if (key === "language" && (rawVal === "hi" || rawVal === "en" || rawVal === "mixed")) {
+      fm.language = rawVal;
+    } else if (key === "tags") {
+      const cleaned = rawVal.replace(/^\[|\]$/g, "");
+      const tags = cleaned.split(/[,\s]+/).map((t) => t.replace(/^#/, "").trim()).filter(Boolean);
+      if (tags.length > 0)
+        fm.tags = tags;
+    }
+  }
+  return { frontmatter: fm, body };
+}
+function parseInlineMetadata(rawText) {
+  const wikiLinks = [];
+  const tags = [];
+  let text = rawText.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, target, alias) => {
+    const cleanTarget = target.trim();
+    const cleanAlias = (alias || target).trim();
+    wikiLinks.push({ target: cleanTarget, alias: cleanAlias });
+    return cleanAlias;
+  });
+  text = text.replace(/(?:^|\s)#([A-Za-z0-9_\-\u0900-\u097F/]+)/g, (full, tag) => {
+    tags.push(tag.trim());
+    return full.startsWith(" ") ? " " : "";
+  });
+  const cleanText = text.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\*([^*]+)\*/g, "$1").replace(/`([^`]+)`/g, "$1").replace(/~~([^~]+)~~/g, "$1").trim();
+  return { cleanText, wikiLinks, tags };
+}
+function createUniqueNodeId(preferredBase, fallbackPrefix, seenIds) {
+  const sanitized = preferredBase.trim().replace(/^#+/, "").replace(/\s+/g, "-").replace(/[^\w\-\u0900-\u097F/.#]/g, "").replace(/^-+|-+$/g, "");
+  const baseId = sanitized || fallbackPrefix;
+  if (!seenIds.has(baseId)) {
+    seenIds.add(baseId);
+    return baseId;
+  }
+  let counter = 2;
+  while (seenIds.has(`${baseId}-${counter}`)) {
+    counter++;
+  }
+  const finalId = `${baseId}-${counter}`;
+  seenIds.add(finalId);
+  return finalId;
+}
+function convertMarkdownToMindMapData(markdownContent, fileBasename, filePath, parentFolderName = "Obsidian Vault") {
+  const { frontmatter, body } = parseFrontmatter(markdownContent);
+  const seenNodeIds = /* @__PURE__ */ new Set();
+  const pendingCrossLinks = [];
+  const docTitle = frontmatter.title || fileBasename || "Untitled Mind Map";
+  const docSubject = frontmatter.subject || parentFolderName || "Obsidian Notes";
+  const docLanguage = frontmatter.language || detectLanguage(body || docTitle);
+  const rootId = createUniqueNodeId(filePath.replace(/\.md$/i, ""), "root-node", seenNodeIds);
+  const rootNode = {
+    id: rootId,
+    label: docTitle,
+    subtitle: frontmatter.subtitle || `Obsidian Note \u2022 ${filePath}`,
+    category: "root",
+    tags: frontmatter.tags ? [...frontmatter.tags] : [],
+    keyFacts: [],
+    children: []
+  };
+  const lines = body.split(/\r?\n/);
+  const headingStack = [{ level: 0, node: rootNode }];
+  let inCodeBlock = false;
+  let nodeCounter = 1;
+  let h1UsedAsRootTitle = false;
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+    if (trimmed.startsWith("```")) {
+      inCodeBlock = !inCodeBlock;
+      continue;
+    }
+    if (inCodeBlock || !trimmed)
+      continue;
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const rawHeadingText = headingMatch[2].trim();
+      const { cleanText, wikiLinks, tags } = parseInlineMetadata(rawHeadingText);
+      const headingLabel = cleanText || rawHeadingText;
+      if (level === 1 && !h1UsedAsRootTitle && rootNode.children && rootNode.children.length === 0 && (headingLabel.toLowerCase() === docTitle.toLowerCase() || !frontmatter.title)) {
+        h1UsedAsRootTitle = true;
+        rootNode.label = headingLabel;
+        if (tags.length > 0) {
+          rootNode.tags = Array.from(/* @__PURE__ */ new Set([...rootNode.tags || [], ...tags]));
+        }
+        continue;
+      }
+      const preferredId = wikiLinks.length > 0 ? wikiLinks[0].target : `${filePath}#${headingLabel}`;
+      const nodeId = createUniqueNodeId(preferredId, `section-${nodeCounter++}`, seenNodeIds);
+      const newNode = {
+        id: nodeId,
+        label: headingLabel,
+        category: level <= 2 ? "branch" : "concept",
+        tags: tags.length > 0 ? tags : void 0,
+        keyFacts: [],
+        children: []
+      };
+      for (const wl of wikiLinks) {
+        pendingCrossLinks.push({ sourceId: nodeId, targetRef: wl.target });
+      }
+      while (headingStack.length > 1 && headingStack[headingStack.length - 1].level >= level) {
+        headingStack.pop();
+      }
+      const parentNode = headingStack[headingStack.length - 1].node;
+      if (!parentNode.children)
+        parentNode.children = [];
+      parentNode.children.push(newNode);
+      headingStack.push({ level, node: newNode });
+      continue;
+    }
+    const currentActiveNode = headingStack[headingStack.length - 1].node;
+    const listMatch = rawLine.match(/^(\s*)(?:[-*+]|\d+\.)\s+(.+)$/);
+    if (listMatch) {
+      const indentSpaces = listMatch[1].replace(/\t/g, "  ").length;
+      const rawItemText = listMatch[2].trim();
+      const { cleanText, wikiLinks, tags } = parseInlineMetadata(rawItemText);
+      if (!cleanText)
+        continue;
+      if (tags.length > 0) {
+        currentActiveNode.tags = Array.from(/* @__PURE__ */ new Set([...currentActiveNode.tags || [], ...tags]));
+      }
+      for (const wl of wikiLinks) {
+        pendingCrossLinks.push({ sourceId: currentActiveNode.id, targetRef: wl.target });
+      }
+      const kvBulletMatch = rawItemText.match(/^\*\*([^*]+)\*\*\s*[:—-]\s*(.+)$/);
+      const isRootWithoutHeadings = currentActiveNode === rootNode && (!rootNode.children || rootNode.children.length === 0 || indentSpaces === 0);
+      if (kvBulletMatch && indentSpaces === 0) {
+        const termParsed = parseInlineMetadata(kvBulletMatch[1]);
+        const descParsed = parseInlineMetadata(kvBulletMatch[2]);
+        const preferredId = wikiLinks.length > 0 ? wikiLinks[0].target : `${filePath}#${termParsed.cleanText}`;
+        const bulletNodeId = createUniqueNodeId(preferredId, `item-${nodeCounter++}`, seenNodeIds);
+        const childNode = {
+          id: bulletNodeId,
+          label: termParsed.cleanText || cleanText,
+          subtitle: descParsed.cleanText.length <= 70 ? descParsed.cleanText : void 0,
+          description: descParsed.cleanText,
+          category: "point",
+          tags: tags.length > 0 ? tags : void 0
+        };
+        if (!currentActiveNode.children)
+          currentActiveNode.children = [];
+        currentActiveNode.children.push(childNode);
+      } else if (isRootWithoutHeadings && indentSpaces === 0) {
+        const preferredId = wikiLinks.length > 0 ? wikiLinks[0].target : `${filePath}#${cleanText.slice(0, 40)}`;
+        const bulletNodeId = createUniqueNodeId(preferredId, `item-${nodeCounter++}`, seenNodeIds);
+        const childNode = {
+          id: bulletNodeId,
+          label: cleanText.length > 64 ? `${cleanText.slice(0, 61)}...` : cleanText,
+          description: cleanText.length > 64 ? cleanText : void 0,
+          category: "point",
+          tags: tags.length > 0 ? tags : void 0
+        };
+        if (!rootNode.children)
+          rootNode.children = [];
+        rootNode.children.push(childNode);
+      } else {
+        if (!currentActiveNode.keyFacts)
+          currentActiveNode.keyFacts = [];
+        currentActiveNode.keyFacts.push(cleanText);
+      }
+      continue;
+    }
+    const cleanLine = parseInlineMetadata(trimmed.replace(/^>\s*/, ""));
+    if (!cleanLine.cleanText)
+      continue;
+    if (cleanLine.tags.length > 0) {
+      currentActiveNode.tags = Array.from(
+        /* @__PURE__ */ new Set([...currentActiveNode.tags || [], ...cleanLine.tags])
+      );
+    }
+    for (const wl of cleanLine.wikiLinks) {
+      pendingCrossLinks.push({ sourceId: currentActiveNode.id, targetRef: wl.target });
+    }
+    if (!currentActiveNode.description) {
+      currentActiveNode.description = cleanLine.cleanText;
+      if (!currentActiveNode.subtitle && cleanLine.cleanText.length <= 80) {
+        currentActiveNode.subtitle = cleanLine.cleanText;
+      }
+    } else if (currentActiveNode.description.length < 450) {
+      currentActiveNode.description += ` ${cleanLine.cleanText}`;
+    }
+  }
+  const nodeLookupByLabel = /* @__PURE__ */ new Map();
+  const cleanTree = (node) => {
+    nodeLookupByLabel.set(node.label.toLowerCase(), node.id);
+    nodeLookupByLabel.set(node.id.toLowerCase(), node.id);
+    if (node.keyFacts && node.keyFacts.length === 0) {
+      delete node.keyFacts;
+    }
+    if (node.tags && node.tags.length === 0) {
+      delete node.tags;
+    }
+    if (node.children && node.children.length === 0) {
+      delete node.children;
+    } else if (node.children) {
+      if (!node.badge && node !== rootNode) {
+        node.badge = `${node.children.length} \u0909\u092A-\u0935\u093F\u0937\u092F`;
+      }
+      node.children.forEach(cleanTree);
+    }
+  };
+  cleanTree(rootNode);
+  const crossLinks = [];
+  const seenPairs = /* @__PURE__ */ new Set();
+  for (const link of pendingCrossLinks) {
+    const targetId = seenNodeIds.has(link.targetRef) ? link.targetRef : nodeLookupByLabel.get(link.targetRef.toLowerCase());
+    if (targetId && targetId !== link.sourceId && seenNodeIds.has(targetId)) {
+      const pairKey = `${link.sourceId}->${targetId}`;
+      if (!seenPairs.has(pairKey)) {
+        seenPairs.add(pairKey);
+        crossLinks.push({
+          sourceId: link.sourceId,
+          targetId,
+          type: "relationship"
+        });
+      }
+    }
+  }
+  return {
+    id: `obsidian-md-${rootId}`,
+    title: docTitle,
+    subtitle: frontmatter.subtitle || rootNode.subtitle,
+    subject: docSubject,
+    chapter: frontmatter.chapter,
+    language: docLanguage,
+    root: rootNode,
+    crossLinks: crossLinks.length > 0 ? crossLinks : void 0
+  };
+}
+function findNodeById(root, targetId) {
+  if (!root || !targetId)
+    return null;
+  if (root.id === targetId)
+    return root;
+  if (root.children) {
+    for (const child of root.children) {
+      const found = findNodeById(child, targetId);
+      if (found)
+        return found;
+    }
+  }
+  return null;
+}
+
+// src/Settings.ts
 var import_obsidian = require("obsidian");
-var MindMapFileView = class extends import_obsidian.FileView {
+var DEFAULT_SETTINGS = {
+  viewerUrl: "https://mindmap.riyasaksena502.workers.dev",
+  autoRefreshOnSave: true,
+  debounceMs: 300,
+  openNoteInNewLeaf: true,
+  autoCreateMissingNote: false,
+  debugMode: false
+};
+function sanitizeViewerUrl(rawUrl) {
+  const trimmed = (rawUrl || "").trim();
+  if (!trimmed)
+    return DEFAULT_SETTINGS.viewerUrl;
+  try {
+    const parsed = new URL(trimmed);
+    const isHttps = parsed.protocol === "https:";
+    const isLocalDevHttp = parsed.protocol === "http:" && (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1");
+    if (isHttps || isLocalDevHttp) {
+      return parsed.toString().replace(/\/$/, "");
+    }
+  } catch (e) {
+  }
+  return DEFAULT_SETTINGS.viewerUrl;
+}
+var MindMapBridgeSettingTab = class extends import_obsidian.PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "MindMap Bridge Settings" });
+    new import_obsidian.Setting(containerEl).setName("Viewer URL").setDesc("Cloudflare-hosted MindMap Studio WebGL endpoint (https:// or http://localhost)").addText(
+      (text) => text.setPlaceholder("https://mindmap.riyasaksena502.workers.dev").setValue(this.plugin.settings.viewerUrl).onChange(async (value) => {
+        this.plugin.settings.viewerUrl = sanitizeViewerUrl(value);
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Open linked notes in new split/tab").setDesc("When clicking 'Obsidian \u092E\u0947\u0902 \u0916\u094B\u0932\u0947\u0902' (\u2318\u21B5) inside the Mind Map inspector, open the target note in a beside split/tab so the WebGL canvas stays open").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.openNoteInNewLeaf).onChange(async (value) => {
+        this.plugin.settings.openNoteInNewLeaf = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Auto-create note if missing on Open").setDesc("If a Mind Map node does not match an existing vault note, automatically create a new Markdown note for that concept when 'Open in Obsidian' is clicked").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.autoCreateMissingNote).onChange(async (value) => {
+        this.plugin.settings.autoCreateMissingNote = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Auto-refresh on save").setDesc("Automatically update the Mind Map view when the local JSON or Markdown file is saved").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.autoRefreshOnSave).onChange(async (value) => {
+        this.plugin.settings.autoRefreshOnSave = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Debounce buffer (ms)").setDesc("Delay in milliseconds before sending updated data to viewer on file edit").addSlider(
+      (slider) => slider.setLimits(100, 1e3, 50).setValue(this.plugin.settings.debounceMs).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.debounceMs = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Debug logging").setDesc("Print workspace leaf and postMessage bridge diagnostics to the developer console").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.debugMode).onChange(async (value) => {
+        this.plugin.settings.debugMode = value;
+        await this.plugin.saveSettings();
+      })
+    );
+  }
+};
+
+// src/MindMapFileView.ts
+var MindMapFileView = class extends import_obsidian2.FileView {
   constructor(leaf, plugin) {
     super(leaf);
     this.iframeEl = null;
+    this.loadingEl = null;
     this.isViewerReady = false;
     this.currentJsonText = null;
+    this.parsedMindMapData = null;
     this.debounceTimer = null;
+    this.loadingFallbackTimer = null;
     this.handleWindowMessage = (event) => {
+      var _a, _b;
       if (!this.iframeEl || !this.iframeEl.contentWindow)
         return;
       if (!event.data || typeof event.data !== "object") {
@@ -49,7 +415,7 @@ var MindMapFileView = class extends import_obsidian.FileView {
       const trustedOrigin = this.getViewerOrigin();
       const isTrustedOrigin = event.origin === trustedOrigin;
       const isOpaqueNullOrigin = event.origin === "null";
-      const isCapacitorLocalOrigin = event.origin.startsWith("capacitor://") || event.origin.startsWith("app://") || event.origin.startsWith("file://") || event.origin.includes("localhost");
+      const isCapacitorLocalOrigin = event.origin.startsWith("capacitor://") || event.origin.startsWith("app://") || event.origin.startsWith("file://") || this.isLocalhostOrigin(event.origin);
       if (!isTrustedOrigin && !isOpaqueNullOrigin && !isCapacitorLocalOrigin) {
         return;
       }
@@ -58,8 +424,16 @@ var MindMapFileView = class extends import_obsidian.FileView {
       }
       if (event.data.type === "MINDMAP_VIEWER_READY") {
         this.isViewerReady = true;
+        this.hideLoadingOverlay();
         if (this.currentJsonText) {
           this.postDataToViewer(this.currentJsonText);
+        }
+        return;
+      }
+      if (event.data.action === "OPEN_NOTE" || event.data.type === "OPEN_NOTE") {
+        const rawNodeId = (_b = (_a = event.data.nodeId) != null ? _a : event.data.id) != null ? _b : event.data.payload && typeof event.data.payload === "object" ? event.data.payload.nodeId : void 0;
+        if (typeof rawNodeId === "string" && rawNodeId.trim().length > 0) {
+          void this.handleOpenNoteRequest(rawNodeId.trim());
         }
       }
     };
@@ -69,21 +443,35 @@ var MindMapFileView = class extends import_obsidian.FileView {
     return VIEW_TYPE_MINDMAP;
   }
   getDisplayText() {
-    return this.file ? this.file.basename : "MindMap Viewer";
+    return this.file ? `${this.file.basename} (Mind Map)` : "MindMap Viewer";
+  }
+  getIcon() {
+    return "network";
+  }
+  getSafeViewerUrl() {
+    return sanitizeViewerUrl(this.plugin.settings.viewerUrl);
   }
   getViewerOrigin() {
     try {
-      const url = new URL(this.plugin.settings.viewerUrl);
+      const url = new URL(this.getSafeViewerUrl());
       return url.origin;
     } catch (e) {
       return "https://mindmap.riyasaksena502.workers.dev";
+    }
+  }
+  isLocalhostOrigin(origin) {
+    try {
+      const parsed = new URL(origin);
+      return (parsed.protocol === "http:" || parsed.protocol === "https:") && (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1");
+    } catch (e) {
+      return false;
     }
   }
   async setState(state, result) {
     await super.setState(state, result);
     if (state && typeof state.file === "string" && state.file.length > 0) {
       const abstractFile = this.app.vault.getAbstractFileByPath(state.file);
-      if (abstractFile instanceof import_obsidian.TFile) {
+      if (abstractFile instanceof import_obsidian2.TFile) {
         this.file = abstractFile;
         await this.onLoadFile(abstractFile);
       }
@@ -98,32 +486,169 @@ var MindMapFileView = class extends import_obsidian.FileView {
     this.containerEl.empty();
     this.containerEl.addClass("mindmap-bridge-view");
     this.addAction("refresh-cw", "Reload MindMap Viewer", () => this.reloadViewer());
-    this.addAction("code", "Open as Text / Raw JSON", () => this.openRawJsonEditor());
-    window.addEventListener("message", this.handleWindowMessage);
+    this.addAction("download", "Export as .mindmap.json", () => this.exportCurrentMindMapJson());
+    this.addAction("code", "Open as Text / Raw Editor", () => this.openRawJsonEditor());
+    this.registerDomEvent(window, "message", this.handleWindowMessage);
+    this.loadingEl = this.containerEl.createDiv({ cls: "mindmap-bridge-loading" });
+    const spinner = this.loadingEl.createDiv({ cls: "mindmap-bridge-spinner" });
+    spinner.setAttribute("aria-hidden", "true");
+    this.loadingEl.createSpan({ text: "Loading MindMap Studio (WebGL)..." });
     this.iframeEl = document.createElement("iframe");
     this.iframeEl.addClass("mindmap-bridge-iframe");
+    this.iframeEl.setAttribute("allow", "fullscreen; clipboard-read; clipboard-write");
+    this.iframeEl.setAttribute("allowfullscreen", "true");
+    this.iframeEl.setAttribute("referrerpolicy", "no-referrer");
     this.iframeEl.addEventListener("load", () => {
       if (this.currentJsonText && this.isViewerReady) {
         this.postDataToViewer(this.currentJsonText);
       }
+      if (this.loadingFallbackTimer) {
+        window.clearTimeout(this.loadingFallbackTimer);
+      }
+      this.loadingFallbackTimer = window.setTimeout(() => {
+        this.hideLoadingOverlay();
+        if (this.currentJsonText && !this.isViewerReady) {
+          this.isViewerReady = true;
+          this.postDataToViewer(this.currentJsonText);
+        }
+      }, 1200);
     });
-    this.iframeEl.src = this.plugin.settings.viewerUrl;
+    this.iframeEl.src = this.getSafeViewerUrl();
     this.containerEl.appendChild(this.iframeEl);
+  }
+  showLoadingOverlay() {
+    if (this.loadingEl) {
+      this.loadingEl.removeClass("is-hidden");
+    }
+  }
+  hideLoadingOverlay() {
+    if (this.loadingEl) {
+      this.loadingEl.addClass("is-hidden");
+    }
+  }
+  /**
+   * Strips [[WikiLink]] brackets and |Alias suffixes from a node ID or label.
+   */
+  stripWikiLinkAndAlias(raw) {
+    let cleaned = raw.replace(/^\[\[|\]\]$/g, "").trim();
+    const pipeIndex = cleaned.indexOf("|");
+    if (pipeIndex !== -1) {
+      cleaned = cleaned.substring(0, pipeIndex).trim();
+    }
+    return cleaned;
+  }
+  /**
+   * Resolves a Mind Map node ID or label to an Obsidian vault note (and optional #heading)
+   * and opens it according to user settings.
+   */
+  async handleOpenNoteRequest(nodeId) {
+    var _a;
+    const sourcePath = this.file ? this.file.path : "";
+    const openInNewLeaf = this.plugin.settings.openNoteInNewLeaf;
+    const matchedNode = findNodeById((_a = this.parsedMindMapData) == null ? void 0 : _a.root, nodeId);
+    if (this.plugin.settings.debugMode) {
+      console.log("[MindMapBridge] OPEN_NOTE received:", {
+        nodeId,
+        matchedLabel: matchedNode == null ? void 0 : matchedNode.label,
+        sourcePath
+      });
+    }
+    const cleanedId = this.stripWikiLinkAndAlias(nodeId);
+    const hashIndex = cleanedId.indexOf("#");
+    const idLinkPath = hashIndex !== -1 ? cleanedId.substring(0, hashIndex) : cleanedId;
+    const idSubpath = hashIndex !== -1 ? cleanedId.substring(hashIndex + 1) : "";
+    const normalizedLinkPath = idLinkPath.replace(/\.md$/i, "").trim();
+    if (normalizedLinkPath.length > 0) {
+      const destById = this.app.metadataCache.getFirstLinkpathDest(normalizedLinkPath, sourcePath) || this.app.metadataCache.getFirstLinkpathDest(idLinkPath.trim(), sourcePath);
+      if (destById instanceof import_obsidian2.TFile) {
+        const fullLink = idSubpath ? `${destById.path}#${idSubpath}` : destById.path;
+        this.plugin.markBypassAutoMindMap(destById.path);
+        await this.app.workspace.openLinkText(fullLink, sourcePath, openInNewLeaf);
+        new import_obsidian2.Notice(`Opened note: ${destById.basename}`);
+        return;
+      }
+    }
+    if (matchedNode && matchedNode.label) {
+      const cleanLabel = this.stripWikiLinkAndAlias(matchedNode.label);
+      const destByLabel = this.app.metadataCache.getFirstLinkpathDest(cleanLabel, sourcePath);
+      if (destByLabel instanceof import_obsidian2.TFile) {
+        this.plugin.markBypassAutoMindMap(destByLabel.path);
+        await this.app.workspace.openLinkText(destByLabel.path, sourcePath, openInNewLeaf);
+        new import_obsidian2.Notice(`Opened note: ${destByLabel.basename}`);
+        return;
+      }
+    }
+    const markdownFiles = this.app.vault.getMarkdownFiles();
+    const targetLower = normalizedLinkPath.toLowerCase();
+    const labelLower = (matchedNode == null ? void 0 : matchedNode.label) ? this.stripWikiLinkAndAlias(matchedNode.label).toLowerCase() : "";
+    const foundMd = markdownFiles.find((f) => {
+      const base = f.basename.toLowerCase();
+      return base === targetLower || labelLower.length > 0 && base === labelLower;
+    });
+    if (foundMd) {
+      const fullLink = idSubpath ? `${foundMd.path}#${idSubpath}` : foundMd.path;
+      this.plugin.markBypassAutoMindMap(foundMd.path);
+      await this.app.workspace.openLinkText(fullLink, sourcePath, openInNewLeaf);
+      new import_obsidian2.Notice(`Opened note: ${foundMd.basename}`);
+      return;
+    }
+    if (this.file && this.file.extension.toLowerCase() === "md") {
+      const headingTarget = idSubpath || ((matchedNode == null ? void 0 : matchedNode.label) ? this.stripWikiLinkAndAlias(matchedNode.label) : "");
+      const linkText = headingTarget ? `${this.file.path}#${headingTarget}` : this.file.path;
+      this.plugin.markBypassAutoMindMap(this.file.path);
+      await this.app.workspace.openLinkText(linkText, sourcePath, openInNewLeaf);
+      new import_obsidian2.Notice(`Opened section in ${this.file.basename}`);
+      return;
+    }
+    const fallbackTitle = ((matchedNode == null ? void 0 : matchedNode.label) ? this.stripWikiLinkAndAlias(matchedNode.label) : normalizedLinkPath || nodeId).replace(/[\\/:*?"<>|#^\[\]]/g, " ").replace(/\s+/g, " ").trim();
+    if (this.plugin.settings.autoCreateMissingNote && fallbackTitle.length > 0) {
+      await this.app.workspace.openLinkText(fallbackTitle, sourcePath, openInNewLeaf);
+      new import_obsidian2.Notice(`Created & opened note: ${fallbackTitle}`);
+    } else {
+      new import_obsidian2.Notice(
+        `No vault note found for "${(matchedNode == null ? void 0 : matchedNode.label) || nodeId}". (Tip: Enable "Auto-create note if missing" in MindMap Bridge settings to create it automatically.)`
+      );
+    }
+  }
+  /**
+   * Reads a .mindmap.json, .json, or .md file and prepares the JSON payload for the WebGL viewer.
+   */
+  async prepareFilePayload(file) {
+    var _a;
+    const rawContent = await this.app.vault.read(file);
+    if (file.extension.toLowerCase() === "md") {
+      const parentName = ((_a = file.parent) == null ? void 0 : _a.name) || "Obsidian Vault";
+      const compiled = convertMarkdownToMindMapData(
+        rawContent,
+        file.basename,
+        file.path,
+        parentName
+      );
+      this.parsedMindMapData = compiled;
+      return JSON.stringify(compiled, null, 2);
+    }
+    try {
+      this.parsedMindMapData = JSON.parse(rawContent);
+    } catch (e) {
+      this.parsedMindMapData = null;
+    }
+    return rawContent;
   }
   async onLoadFile(file) {
     this.file = file;
     try {
-      const content = await this.app.vault.read(file);
-      this.currentJsonText = content;
+      const payload = await this.prepareFilePayload(file);
+      this.currentJsonText = payload;
       if (this.isViewerReady) {
-        this.postDataToViewer(content);
+        this.postDataToViewer(payload);
       }
     } catch (err) {
-      new import_obsidian.Notice(`Failed to read MindMap file: ${err instanceof Error ? err.message : String(err)}`);
+      new import_obsidian2.Notice(`Failed to read MindMap file: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   async onUnloadFile(file) {
     this.currentJsonText = null;
+    this.parsedMindMapData = null;
     if (this.debounceTimer) {
       window.clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
@@ -131,12 +656,16 @@ var MindMapFileView = class extends import_obsidian.FileView {
     await super.onUnloadFile(file);
   }
   async onClose() {
-    window.removeEventListener("message", this.handleWindowMessage);
     this.isViewerReady = false;
     this.currentJsonText = null;
+    this.parsedMindMapData = null;
     if (this.debounceTimer) {
       window.clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
+    }
+    if (this.loadingFallbackTimer) {
+      window.clearTimeout(this.loadingFallbackTimer);
+      this.loadingFallbackTimer = null;
     }
     if (this.iframeEl) {
       this.iframeEl.remove();
@@ -150,10 +679,10 @@ var MindMapFileView = class extends import_obsidian.FileView {
       }
       this.debounceTimer = window.setTimeout(async () => {
         if (this.file && this.file.path === file.path) {
-          const content = await this.app.vault.read(this.file);
-          this.currentJsonText = content;
+          const payload = await this.prepareFilePayload(this.file);
+          this.currentJsonText = payload;
           if (this.isViewerReady) {
-            this.postDataToViewer(content);
+            this.postDataToViewer(payload);
           }
         }
       }, this.plugin.settings.debounceMs);
@@ -175,8 +704,33 @@ var MindMapFileView = class extends import_obsidian.FileView {
   }
   reloadViewer() {
     this.isViewerReady = false;
+    this.showLoadingOverlay();
     if (this.iframeEl) {
-      this.iframeEl.src = this.plugin.settings.viewerUrl;
+      this.iframeEl.src = this.getSafeViewerUrl();
+    }
+  }
+  async exportCurrentMindMapJson() {
+    if (!this.file || !this.currentJsonText) {
+      new import_obsidian2.Notice("No Mind Map data loaded to export.");
+      return;
+    }
+    if (this.plugin.isMindMapFile(this.file)) {
+      new import_obsidian2.Notice(`${this.file.name} is already a .mindmap.json file.`);
+      return;
+    }
+    const parentPrefix = this.file.parent && this.file.parent.path !== "/" ? `${this.file.parent.path}/` : "";
+    const targetPath = (0, import_obsidian2.normalizePath)(`${parentPrefix}${this.file.basename}.mindmap.json`);
+    try {
+      const existing = this.app.vault.getAbstractFileByPath(targetPath);
+      if (existing instanceof import_obsidian2.TFile) {
+        await this.app.vault.modify(existing, this.currentJsonText);
+        new import_obsidian2.Notice(`Updated ${existing.name}`);
+      } else {
+        const created = await this.app.vault.create(targetPath, this.currentJsonText);
+        new import_obsidian2.Notice(`Exported ${created.name}`);
+      }
+    } catch (err) {
+      new import_obsidian2.Notice(`Failed to export MindMap JSON: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   async openRawJsonEditor() {
@@ -186,46 +740,14 @@ var MindMapFileView = class extends import_obsidian.FileView {
   }
 };
 
-// src/Settings.ts
-var import_obsidian2 = require("obsidian");
-var DEFAULT_SETTINGS = {
-  viewerUrl: "https://mindmap.riyasaksena502.workers.dev",
-  autoRefreshOnSave: true,
-  debounceMs: 300
-};
-var MindMapBridgeSettingTab = class extends import_obsidian2.PluginSettingTab {
-  constructor(app, plugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-  display() {
-    const { containerEl } = this;
-    containerEl.empty();
-    containerEl.createEl("h2", { text: "MindMap Bridge Settings" });
-    new import_obsidian2.Setting(containerEl).setName("Viewer URL").setDesc("Cloudflare-hosted Mind Map Viewer endpoint").addText(
-      (text) => text.setPlaceholder("https://mindmap.riyasaksena502.workers.dev").setValue(this.plugin.settings.viewerUrl).onChange(async (value) => {
-        this.plugin.settings.viewerUrl = value.trim() || DEFAULT_SETTINGS.viewerUrl;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian2.Setting(containerEl).setName("Auto-refresh on save").setDesc("Automatically update the Mind Map view when the local JSON file is saved").addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings.autoRefreshOnSave).onChange(async (value) => {
-        this.plugin.settings.autoRefreshOnSave = value;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian2.Setting(containerEl).setName("Debounce buffer (ms)").setDesc("Delay in milliseconds before sending updated JSON to viewer on file edit").addSlider(
-      (slider) => slider.setLimits(100, 1e3, 50).setValue(this.plugin.settings.debounceMs).setDynamicTooltip().onChange(async (value) => {
-        this.plugin.settings.debounceMs = value;
-        await this.plugin.saveSettings();
-      })
-    );
-  }
-};
-
 // src/main.ts
 var VIEW_TYPE_MINDMAP = "mindmap-json-view";
 var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
+  constructor() {
+    super(...arguments);
+    this.bypassAutoMindMapPaths = /* @__PURE__ */ new Map();
+    this.rawEditorLeaves = /* @__PURE__ */ new WeakSet();
+  }
   async onload() {
     await this.loadSettings();
     this.registerView(
@@ -249,6 +771,17 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
       this.app.workspace.on("file-open", (file) => {
         var _a;
         if (file && this.isMindMapFile(file)) {
+          const existingTimer = this.bypassAutoMindMapPaths.get(file.path);
+          if (existingTimer !== void 0) {
+            window.clearTimeout(existingTimer);
+            this.bypassAutoMindMapPaths.delete(file.path);
+            return;
+          }
+          const activeFileView = this.app.workspace.getActiveViewOfType(import_obsidian3.FileView);
+          const targetLeaf = activeFileView && ((_a = activeFileView.file) == null ? void 0 : _a.path) === file.path ? activeFileView.leaf : this.getLeafForFile(file);
+          if (targetLeaf && this.rawEditorLeaves.has(targetLeaf)) {
+            return;
+          }
           const existingMindMapLeaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_MINDMAP).find(
             (l) => {
               var _a2;
@@ -259,10 +792,8 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
             this.app.workspace.revealLeaf(existingMindMapLeaf);
             return;
           }
-          const activeFileView = this.app.workspace.getActiveViewOfType(import_obsidian3.FileView);
-          const targetLeaf = activeFileView && ((_a = activeFileView.file) == null ? void 0 : _a.path) === file.path ? activeFileView.leaf : this.getLeafForFile(file);
           if (targetLeaf && targetLeaf.view.getViewType() !== VIEW_TYPE_MINDMAP) {
-            this.openFileInMindMapViewer(file, targetLeaf);
+            void this.openFileInMindMapViewer(file, targetLeaf);
           }
         }
       })
@@ -273,9 +804,14 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
         if (file instanceof import_obsidian3.TFile) {
-          if (this.isMindMapFile(file) || this.isJsonFile(file)) {
+          if (this.isMindMapFile(file) || this.isJsonFile(file) || this.isMarkdownFile(file)) {
             menu.addItem((item) => {
               item.setTitle("Open as Mind Map").setIcon("network").onClick(() => this.openFileInMindMapViewer(file));
+            });
+          }
+          if (this.isMarkdownFile(file)) {
+            menu.addItem((item) => {
+              item.setTitle("Export to .mindmap.json").setIcon("download").onClick(() => this.exportMarkdownFileToMindMap(file));
             });
           }
           if (this.isMindMapFile(file)) {
@@ -295,11 +831,23 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
       name: "Open active file as Mind Map",
       callback: () => {
         this.debugWorkspaceState();
-        const targetFile = this.getActiveJsonFile();
+        const targetFile = this.getActiveMindMapCompatibleFile();
         if (targetFile) {
-          this.openFileInMindMapViewer(targetFile);
+          void this.openFileInMindMapViewer(targetFile);
         } else {
-          new import_obsidian3.Notice("No active JSON or MindMap file found. Please select or open a file first.");
+          new import_obsidian3.Notice("No active MindMap (.mindmap.json), JSON, or Markdown (.md) file found.");
+        }
+      }
+    });
+    this.addCommand({
+      id: "export-active-markdown-to-mindmap",
+      name: "Export active Markdown note to .mindmap.json",
+      callback: () => {
+        const activeFile = this.getCurrentVaultFile();
+        if (activeFile && this.isMarkdownFile(activeFile)) {
+          void this.exportMarkdownFileToMindMap(activeFile);
+        } else {
+          new import_obsidian3.Notice("Please open or select a Markdown (.md) note to export as .mindmap.json.");
         }
       }
     });
@@ -324,15 +872,19 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
     });
     this.addRibbonIcon("network", "Open MindMap Viewer", () => {
       this.debugWorkspaceState();
-      const activeFile = this.getActiveJsonFile();
+      const activeFile = this.getActiveMindMapCompatibleFile();
       if (activeFile) {
-        this.openFileInMindMapViewer(activeFile);
+        void this.openFileInMindMapViewer(activeFile);
       } else {
-        new import_obsidian3.Notice("No active JSON or MindMap file found. Please select or open a file first.");
+        new import_obsidian3.Notice("No active MindMap (.mindmap.json), JSON, or Markdown (.md) file found.");
       }
     });
   }
   async onunload() {
+    for (const timerId of this.bypassAutoMindMapPaths.values()) {
+      window.clearTimeout(timerId);
+    }
+    this.bypassAutoMindMapPaths.clear();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_MINDMAP);
   }
   async loadSettings() {
@@ -340,6 +892,16 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+  markBypassAutoMindMap(filePath) {
+    const prevTimer = this.bypassAutoMindMapPaths.get(filePath);
+    if (prevTimer !== void 0) {
+      window.clearTimeout(prevTimer);
+    }
+    const timerId = window.setTimeout(() => {
+      this.bypassAutoMindMapPaths.delete(filePath);
+    }, 1500);
+    this.bypassAutoMindMapPaths.set(filePath, timerId);
   }
   isMindMapFile(file) {
     if (!file)
@@ -351,21 +913,34 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
       return false;
     return file.extension.toLowerCase() === "json";
   }
+  isMarkdownFile(file) {
+    if (!file)
+      return false;
+    return file.extension.toLowerCase() === "md";
+  }
   debugWorkspaceState() {
     var _a, _b, _c;
+    if (!this.settings.debugMode)
+      return;
     const workspace = this.app.workspace;
     const activeView = workspace.getActiveViewOfType(import_obsidian3.FileView);
     console.log("=== DIAGNOSTICS: Workspace State ===");
     console.log("1. workspace.getActiveFile():", (_a = workspace.getActiveFile()) == null ? void 0 : _a.path);
     console.log("2. workspace.getActiveViewOfType(FileView)?.file:", (_b = activeView == null ? void 0 : activeView.file) == null ? void 0 : _b.path);
     const mostRecentLeafFile = ((_c = workspace.getMostRecentLeaf()) == null ? void 0 : _c.view) && "file" in workspace.getMostRecentLeaf().view ? workspace.getMostRecentLeaf().view.file : void 0;
-    console.log("3. workspace.getMostRecentLeaf()?.view?.file:", mostRecentLeafFile instanceof import_obsidian3.TFile ? mostRecentLeafFile.path : mostRecentLeafFile);
+    console.log(
+      "3. workspace.getMostRecentLeaf()?.view?.file:",
+      mostRecentLeafFile instanceof import_obsidian3.TFile ? mostRecentLeafFile.path : mostRecentLeafFile
+    );
     const activeFile = this.getCurrentVaultFile();
-    console.log("4. Resolved active file:", activeFile ? {
-      name: activeFile.name,
-      path: activeFile.path,
-      extension: activeFile.extension
-    } : null);
+    console.log(
+      "4. Resolved active file:",
+      activeFile ? {
+        name: activeFile.name,
+        path: activeFile.path,
+        extension: activeFile.extension
+      } : null
+    );
     workspace.iterateAllLeaves((leaf) => {
       const leafFile = "file" in leaf.view ? leaf.view.file : null;
       console.log(`Leaf: viewType=${leaf.view.getViewType()}, file=${leafFile == null ? void 0 : leafFile.path}, name=${leafFile == null ? void 0 : leafFile.name}`);
@@ -398,6 +973,13 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
     }
     return null;
   }
+  getActiveMindMapCompatibleFile() {
+    const file = this.getCurrentVaultFile();
+    if (file && (this.isMindMapFile(file) || this.isJsonFile(file) || this.isMarkdownFile(file))) {
+      return file;
+    }
+    return null;
+  }
   getLeafForFile(file) {
     let foundLeaf = null;
     this.app.workspace.iterateAllLeaves((leaf) => {
@@ -412,7 +994,7 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
     this.app.workspace.iterateAllLeaves((leaf) => {
       if (leaf.view instanceof import_obsidian3.FileView && leaf.view.file && this.isMindMapFile(leaf.view.file)) {
         if (leaf.view.getViewType() !== VIEW_TYPE_MINDMAP) {
-          this.openFileInMindMapViewer(leaf.view.file, leaf);
+          void this.openFileInMindMapViewer(leaf.view.file, leaf);
         }
       }
     });
@@ -421,21 +1003,22 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
     var _a;
     let leaf = targetLeaf;
     if (!leaf) {
-      leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_MINDMAP).find(
-        (l) => {
-          var _a2;
-          return l.view instanceof MindMapFileView && ((_a2 = l.view.file) == null ? void 0 : _a2.path) === file.path;
-        }
-      ) || null;
+      leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_MINDMAP).find((l) => {
+        var _a2;
+        return l.view instanceof MindMapFileView && ((_a2 = l.view.file) == null ? void 0 : _a2.path) === file.path;
+      }) || null;
     }
     if (!leaf) {
       const activeFileView = this.app.workspace.getActiveViewOfType(import_obsidian3.FileView);
-      if (activeFileView && ((_a = activeFileView.file) == null ? void 0 : _a.path) === file.path) {
+      if (this.isMarkdownFile(file) && this.settings.openNoteInNewLeaf) {
+        leaf = this.app.workspace.getLeaf("split");
+      } else if (activeFileView && ((_a = activeFileView.file) == null ? void 0 : _a.path) === file.path) {
         leaf = activeFileView.leaf;
       } else {
         leaf = this.app.workspace.getLeaf(false);
       }
     }
+    this.rawEditorLeaves.delete(leaf);
     await leaf.setViewState({
       type: VIEW_TYPE_MINDMAP,
       state: { file: file.path },
@@ -444,23 +1027,111 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
   async openFileAsRawJson(file, targetLeaf) {
+    this.markBypassAutoMindMap(file.path);
     const leaf = targetLeaf || this.app.workspace.getLeaf(false);
-    await leaf.openFile(file, { active: true });
+    this.rawEditorLeaves.add(leaf);
+    try {
+      await leaf.setViewState({
+        type: "markdown",
+        state: { file: file.path, mode: "source" },
+        active: true
+      });
+      this.app.workspace.revealLeaf(leaf);
+    } catch (e) {
+      this.markBypassAutoMindMap(file.path);
+      await leaf.openFile(file, { active: true });
+    }
+  }
+  async exportMarkdownFileToMindMap(file) {
+    var _a;
+    try {
+      const rawMarkdown = await this.app.vault.read(file);
+      const parentName = ((_a = file.parent) == null ? void 0 : _a.name) || "Obsidian Vault";
+      const compiled = convertMarkdownToMindMapData(rawMarkdown, file.basename, file.path, parentName);
+      const jsonText = JSON.stringify(compiled, null, 2);
+      const parentPrefix = file.parent && file.parent.path !== "/" ? `${file.parent.path}/` : "";
+      const targetPath = (0, import_obsidian3.normalizePath)(`${parentPrefix}${file.basename}.mindmap.json`);
+      let targetFile;
+      const existing = this.app.vault.getAbstractFileByPath(targetPath);
+      if (existing instanceof import_obsidian3.TFile) {
+        await this.app.vault.modify(existing, jsonText);
+        targetFile = existing;
+        new import_obsidian3.Notice(`Updated ${targetFile.name}`);
+      } else {
+        targetFile = await this.app.vault.create(targetPath, jsonText);
+        new import_obsidian3.Notice(`Created ${targetFile.name}`);
+      }
+      await this.openFileInMindMapViewer(targetFile);
+    } catch (err) {
+      new import_obsidian3.Notice(`Error exporting MindMap JSON: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   async createNewMindMapFile(parentFolderPath) {
     var _a;
-    const fileName = `mindmap-${Date.now()}.mindmap.json`;
+    const timestamp = Date.now();
+    const fileName = `mindmap-${timestamp}.mindmap.json`;
     const initialContent = JSON.stringify(
       {
-        id: "new-mindmap",
-        title: "New Mind Map",
-        subject: "General",
+        id: `mindmap-${timestamp}`,
+        title: "New Study Mind Map",
+        subtitle: "Interactive Concept Graph \u2022 Obsidian Bridge",
+        subject: "General Studies",
         language: "en",
         root: {
-          id: "root",
-          label: "New Mind Map",
-          children: []
-        }
+          id: "root-concept",
+          label: "Central Topic",
+          subtitle: "Core thesis & foundational overview",
+          description: "Double-check or edit this .mindmap.json file in Obsidian to add branches, keyFacts, tags, and quiz questions.",
+          category: "core",
+          badge: "2 Branches",
+          tags: ["Obsidian", "MindMap"],
+          keyFacts: [
+            "Click any node to inspect its details in the Porcelain Inspector panel.",
+            "Press Cmd/Ctrl + Enter (or click 'Obsidian \u092E\u0947\u0902 \u0916\u094B\u0932\u0947\u0902') to jump to the linked vault note."
+          ],
+          children: [
+            {
+              id: "branch-1",
+              label: "Primary Concept A",
+              subtitle: "Key sub-topic & mechanism",
+              description: "Detailed notes for Primary Concept A rendered inside the side inspector.",
+              category: "branch",
+              badge: "High Yield",
+              tags: ["ConceptA"],
+              keyFacts: [
+                "First high-yield checkpoint for Active Recall.",
+                "Second synthesis point for revision."
+              ]
+            },
+            {
+              id: "branch-2",
+              label: "Primary Concept B",
+              subtitle: "Comparative analysis & applications",
+              description: "Detailed notes for Primary Concept B.",
+              category: "branch",
+              tags: ["ConceptB"],
+              keyFacts: [
+                "Core application and exam takeaway."
+              ]
+            }
+          ]
+        },
+        quizQuestions: [
+          {
+            id: "q-1",
+            nodeId: "branch-1",
+            nodeLabel: "Primary Concept A",
+            question: "Which shortcut opens the currently selected Mind Map node directly in Obsidian?",
+            options: [
+              "Cmd/Ctrl + Enter",
+              "Alt + F4",
+              "Shift + Space",
+              "Ctrl + P"
+            ],
+            correctAnswerIndex: 0,
+            explanation: "Pressing Cmd/Ctrl + Enter (or clicking 'Obsidian \u092E\u0947\u0902 \u0916\u094B\u0932\u0947\u0902') sends an OPEN_NOTE message to the Obsidian MindMap Bridge plugin."
+          }
+        ]
       },
       null,
       2
@@ -469,9 +1140,10 @@ var MindMapBridgePlugin2 = class extends import_obsidian3.Plugin {
     if (parentFolderPath) {
       targetPath = (0, import_obsidian3.normalizePath)(`${parentFolderPath}/${fileName}`);
     } else {
-      const activeFile = this.getActiveJsonFile();
+      const activeFile = this.getCurrentVaultFile();
       const parentFolder = this.app.fileManager.getNewFileParent((_a = activeFile == null ? void 0 : activeFile.path) != null ? _a : "");
-      targetPath = (0, import_obsidian3.normalizePath)(`${parentFolder.path}/${fileName}`);
+      const prefix = parentFolder.path && parentFolder.path !== "/" ? `${parentFolder.path}/` : "";
+      targetPath = (0, import_obsidian3.normalizePath)(`${prefix}${fileName}`);
     }
     try {
       const createdFile = await this.app.vault.create(targetPath, initialContent);

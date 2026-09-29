@@ -1,7 +1,7 @@
 {
   "name": "obsidian-mindmap-bridge",
-  "version": "1.0.0",
-  "description": "Obsidian bridge plugin connecting local vault MindMap JSON files to Cloudflare Mind Map Viewer",
+  "version": "1.1.0",
+  "description": "Obsidian bi-directional bridge plugin connecting local vault Markdown & MindMap JSON files to Cloudflare MindMap Studio (WebGL)",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
